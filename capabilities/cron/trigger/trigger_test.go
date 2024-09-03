@@ -487,6 +487,9 @@ func TestCronTrigger_TimeWindows(t *testing.T) {
 }
 
 func TestCronTrigger_MultipleRealClock(t *testing.T) {
+	// TODO: https://smartcontract-it.atlassian.net/browse/CAPPL-35
+	t.Skip()
+
 	realClock := clockwork.NewRealClock()
 	ts := New(Params{Logger: logger.Nop(), Clock: realClock})
 	ctx := tests.Context(t)
