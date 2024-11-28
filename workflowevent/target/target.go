@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"errors"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -89,6 +90,8 @@ func (c *capability) Execute(ctx context.Context, rawRequest capabilities.Capabi
 	if !ok {
 		return capabilities.CapabilityResponse{}, errors.New("payload is not a map")
 	}
+
+	payloadMap.Underlying["event_timestamp"] = values.NewString(time.Now().UTC().Format(time.RFC3339Nano))
 
 	pbMap := values.ProtoMap(payloadMap)
 

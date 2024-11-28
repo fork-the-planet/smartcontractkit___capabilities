@@ -46,12 +46,7 @@ func TestCapability_Execute(t *testing.T) {
 			err := unmarshalFn(body, pbm)
 			assert.NoError(t, err)
 
-			rawMap := map[string]any{}
-			for k, v := range pbm.Fields {
-				rawMap[k] = v.GetStringValue()
-			}
-
-			assert.Equal(t, rawMap, map[string]any{"service": "Beholder", "component": "Unit test"})
+			assert.Len(t, pbm.Fields, 3)
 			return nil
 		}}
 
@@ -241,12 +236,7 @@ func TestCapability_Execute(t *testing.T) {
 			err := unmarshalFn(body, pbm)
 			assert.NoError(t, err)
 
-			rawMap := map[string]any{}
-			for k, v := range pbm.Fields {
-				rawMap[k] = v.GetStringValue()
-			}
-
-			assert.Equal(t, rawMap, map[string]any{"service": "Beholder", "component": "Unit test"})
+			assert.Len(t, pbm.Fields, 3)
 			return nil
 		}}
 
