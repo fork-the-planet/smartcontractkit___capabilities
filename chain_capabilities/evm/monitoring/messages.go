@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	evmcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/chain-capabilities/evm"
+	valuespb "github.com/smartcontractkit/chainlink-common/pkg/values/pb"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 
@@ -45,16 +47,16 @@ func NewMessageBuilder(chainInfo types.ChainInfo, capInfo capabilities.Capabilit
 	return &MessageBuilder{ChainInfo: chainInfo, CapInfo: capInfo, nodeAddress: nodeAddress}
 }
 
-func (m *MessageBuilder) BuildCallContractInitiated(r ReadRequest, msg *evm.CallMsg, bn *big.Int) *CallContractInitiated {
-	return &CallContractInitiated{Req: &CallContractRequest{BlockNumber: bn.Int64(), ContractAddress: common.Bytes2Hex(msg.To[:])}, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildCallContractInitiated(r ReadRequest, msg *evm.CallMsg, bn int64) *CallContractInitiated {
+	return &CallContractInitiated{Req: &CallContractRequest{BlockNumber: bn, ContractAddress: common.Bytes2Hex(msg.To[:])}, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildCallContractSuccess(r ReadRequest, msg *evm.CallMsg, bn *big.Int) Message {
-	return &CallContractSuccess{Req: &CallContractRequest{BlockNumber: bn.Int64(), ContractAddress: common.Bytes2Hex(msg.To[:])}, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildCallContractSuccess(r ReadRequest, msg *evm.CallMsg, bn int64) Message {
+	return &CallContractSuccess{Req: &CallContractRequest{BlockNumber: bn, ContractAddress: common.Bytes2Hex(msg.To[:])}, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildCallContractError(r ReadRequest, msg *evm.CallMsg, bn *big.Int, summary, cause string) ErrorMessage {
-	return &CallContractError{Req: &CallContractRequest{BlockNumber: bn.Int64(), ContractAddress: common.Bytes2Hex(msg.To[:])}, Summary: summary, Cause: cause, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildCallContractError(r ReadRequest, msg *evm.CallMsg, bn int64, summary, cause string) ErrorMessage {
+	return &CallContractError{Req: &CallContractRequest{BlockNumber: bn, ContractAddress: common.Bytes2Hex(msg.To[:])}, Summary: summary, Cause: cause, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
 func (m *MessageBuilder) BuildFilterLogsInitiated(r ReadRequest, fq evmtypes.FilterQuery) *FilterLogsInitiated {
@@ -69,16 +71,16 @@ func (m *MessageBuilder) BuildFilterLogsError(r ReadRequest, fq evmtypes.FilterQ
 	return &FilterLogsError{Req: toFilterLogsRequest(fq), Summary: summary, Cause: cause, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildBalanceAtInitiated(r ReadRequest, account string, bn *big.Int) *BalanceAtInitiated {
-	return &BalanceAtInitiated{Req: &BalanceAtRequest{Account: account, BlockNumber: bn.Int64()}, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildBalanceAtInitiated(r ReadRequest, account string, bn int64) *BalanceAtInitiated {
+	return &BalanceAtInitiated{Req: &BalanceAtRequest{Account: account, BlockNumber: bn}, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildBalanceAtSuccess(r ReadRequest, account string, bn, bal *big.Int) Message {
-	return &BalanceAtSuccess{Req: &BalanceAtRequest{Account: account, BlockNumber: bn.Int64()}, Balance: bal.String(), ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildBalanceAtSuccess(r ReadRequest, account string, bn int64, bal *big.Int) Message {
+	return &BalanceAtSuccess{Req: &BalanceAtRequest{Account: account, BlockNumber: bn}, Balance: bal.String(), ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildBalanceAtError(r ReadRequest, account string, bn *big.Int, summary, cause string) ErrorMessage {
-	return &BalanceAtError{Req: &BalanceAtRequest{Account: account, BlockNumber: bn.Int64()}, Summary: summary, Cause: cause, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildBalanceAtError(r ReadRequest, account string, bn int64, summary, cause string) ErrorMessage {
+	return &BalanceAtError{Req: &BalanceAtRequest{Account: account, BlockNumber: bn}, Summary: summary, Cause: cause, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
 func (m *MessageBuilder) BuildEstimateGasInitiated(r ReadRequest, from, to string, data []byte) *EstimateGasInitiated {
@@ -97,14 +99,19 @@ func (m *MessageBuilder) BuildGetTransactionByHashInitiated(r ReadRequest, hash 
 	return &GetTransactionByHashInitiated{Req: &GetTransactionByHashRequest{Hash: hash}, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildGetTransactionByHashSuccess(r ReadRequest, hash string, tx *evm.Transaction) Message {
-	return &GetTransactionByHashSuccess{Req: &GetTransactionByHashRequest{Hash: hash}, Transaction: &TransactionData{
-		TxHash:   common.Bytes2Hex(tx.Hash[:]),
-		TxNonce:  tx.Nonce,
-		Gas:      tx.Gas,
-		GasPrice: tx.GasPrice.Uint64(),
-		Value:    tx.Value.Uint64(),
-	}, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildGetTransactionByHashSuccess(r ReadRequest, hash string, tx *evmcap.Transaction) Message {
+	txData := &TransactionData{
+		TxHash:  common.Bytes2Hex(tx.Hash[:]),
+		TxNonce: tx.Nonce,
+		Gas:     tx.Gas,
+	}
+	if tx.GasPrice != nil {
+		txData.GasPrice = valuespb.NewIntFromBigInt(tx.GasPrice).Uint64()
+	}
+	if tx.Value != nil {
+		txData.Value = valuespb.NewIntFromBigInt(tx.Value).Uint64()
+	}
+	return &GetTransactionByHashSuccess{Req: &GetTransactionByHashRequest{Hash: hash}, Transaction: txData, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
 func (m *MessageBuilder) BuildGetTransactionByHashError(r ReadRequest, hash, summary, cause string) ErrorMessage {
@@ -115,17 +122,25 @@ func (m *MessageBuilder) BuildGetTransactionReceiptInitiated(r ReadRequest, hash
 	return &GetTransactionReceiptInitiated{Req: &GetTransactionReceiptRequest{Hash: hash}, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
-func (m *MessageBuilder) BuildGetTransactionReceiptSuccess(r ReadRequest, hash string, receipt *evm.Receipt) Message {
-	return &GetTransactionReceiptSuccess{Req: &GetTransactionReceiptRequest{Hash: hash}, Receipt: &Receipt{
-		Status:            receipt.Status,
-		TxHash:            common.BytesToHash(receipt.TxHash[:]).String(),
-		ContractAddress:   common.BytesToAddress(receipt.ContractAddress[:]).String(),
-		GasUsed:           receipt.GasUsed,
-		BlockHash:         common.BytesToHash(receipt.BlockHash[:]).String(),
-		BlockNumber:       receipt.BlockNumber.Uint64(),
-		TransactionIndex:  receipt.TransactionIndex,
-		EffectiveGasPrice: receipt.EffectiveGasPrice.Uint64(),
-	}, ExecutionContext: m.BuildExecutionContext(r)}
+func (m *MessageBuilder) BuildGetTransactionReceiptSuccess(r ReadRequest, hash string, receipt *evmcap.Receipt) Message {
+	receiptData := &Receipt{
+		Status:           receipt.Status,
+		TxHash:           common.BytesToHash(receipt.TxHash[:]).String(),
+		ContractAddress:  common.BytesToAddress(receipt.ContractAddress[:]).String(),
+		GasUsed:          receipt.GasUsed,
+		BlockHash:        common.BytesToHash(receipt.BlockHash[:]).String(),
+		TransactionIndex: receipt.TxIndex,
+	}
+
+	if receipt.BlockNumber != nil {
+		receiptData.BlockNumber = valuespb.NewIntFromBigInt(receipt.BlockNumber).Uint64()
+	}
+
+	if receipt.EffectiveGasPrice != nil {
+		receiptData.EffectiveGasPrice = valuespb.NewIntFromBigInt(receipt.EffectiveGasPrice).Uint64()
+	}
+
+	return &GetTransactionReceiptSuccess{Req: &GetTransactionReceiptRequest{Hash: hash}, Receipt: receiptData, ExecutionContext: m.BuildExecutionContext(r)}
 }
 
 func (m *MessageBuilder) BuildGetTransactionReceiptError(r ReadRequest, hash, summary, cause string) ErrorMessage {
@@ -201,11 +216,19 @@ func toFilterLogsRequest(fq evmtypes.FilterQuery) *FilterLogsRequest {
 		hexTopics = append(hexTopics, &Topics{Topic: hexTopicsList})
 	}
 
-	return &FilterLogsRequest{
-		FromBlock: fq.FromBlock.Int64(),
-		ToBlock:   fq.ToBlock.Int64(),
+	result := &FilterLogsRequest{
 		BlockHash: common.Bytes2Hex(fq.BlockHash[:]),
 		Addresses: hexAddresses,
 		Topics:    hexTopics,
 	}
+
+	if fq.FromBlock != nil {
+		result.FromBlock = fq.FromBlock.Int64()
+	}
+
+	if fq.ToBlock != nil {
+		result.ToBlock = fq.ToBlock.Int64()
+	}
+
+	return result
 }
