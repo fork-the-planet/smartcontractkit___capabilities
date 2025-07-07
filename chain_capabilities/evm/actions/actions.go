@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/shopspring/decimal"
 
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -34,8 +35,7 @@ import (
 type ConsensusHandler interface {
 	// Handle - returns a channel to the result of `request.GetObservation()`. This result is consistent across all nodes in
 	// the DON, even if individual RPC states differ.
-	//TODO: switches from bytes to <-chan any as part of PLEX-1470
-	Handle(ctx context.Context, request ctypes.Request) (<-chan []byte, error)
+	Handle(ctx context.Context, request ctypes.Request) (<-chan any, error)
 }
 
 type EVM struct {
@@ -111,20 +111,14 @@ func (e EVM) CallContract(
 		})
 	}
 
-	resultCh, err := e.ConsensusHandler.Handle(ctx, request)
+	data, err := readType[[]byte](ctx, e.ConsensusHandler, request)
 	if err != nil {
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildCallContractError(read, callMsg, blockNumber.Int64(), "Failed to read CallContract", err.Error()))
 		return nil, err
 	}
 
-	select {
-	case <-ctx.Done():
-		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildCallContractError(read, callMsg, blockNumber.Int64(), "Failed to read CallContract", ctx.Err().Error()))
-		return nil, ctx.Err()
-	case data := <-resultCh:
-		monitoring.LogAndEmitSuccess(ctx, "Successfully read CallContract", e.lggr, e.beholderProcessor, e.messageBuilder.BuildCallContractSuccess(read, callMsg, blockNumber.Int64()))
-		return &pb.CallContractReply{Data: data}, nil
-	}
+	monitoring.LogAndEmitSuccess(ctx, "Successfully read CallContract", e.lggr, e.beholderProcessor, e.messageBuilder.BuildCallContractSuccess(read, callMsg, blockNumber.Int64()))
+	return &pb.CallContractReply{Data: data}, nil
 }
 
 func (e EVM) filterLogsToRequest(meta capabilities.RequestMetadata, ethFilterQuery evmtypes.FilterQuery) (ctypes.Request, error) {
@@ -197,7 +191,7 @@ func (e EVM) FilterLogs(ctx context.Context, meta capabilities.RequestMetadata, 
 	monitoring.EmitInitiated(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildFilterLogsInitiated(read, ethFilterQuery))
 
 	var reply pb.FilterLogsReply
-	err = e.getReply(ctx, request, &reply)
+	err = e.readProto(ctx, request, &reply)
 	if err != nil {
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildFilterLogsError(read, ethFilterQuery, "Failed to FilterLogs", err.Error()))
 		return nil, err
@@ -215,7 +209,6 @@ func (e EVM) BalanceAt(ctx context.Context, meta capabilities.RequestMetadata, r
 	if err != nil {
 		return nil, err
 	}
-
 	monitoring.EmitInitiated(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildBalanceAtInitiated(read, common.Bytes2Hex(req.GetAccount()), blockNumber.Int64()))
 
 	balanceAt := func(ctx context.Context, height *ctypes.ChainHeight) ([]byte, error) {
@@ -242,7 +235,7 @@ func (e EVM) BalanceAt(ctx context.Context, meta capabilities.RequestMetadata, r
 	}
 
 	balance := new(valuespb.BigInt)
-	if err := e.getReply(ctx, request, balance); err != nil {
+	if err := e.readProto(ctx, request, balance); err != nil {
 		errMsg := e.messageBuilder.BuildBalanceAtError(read, common.Bytes2Hex(req.GetAccount()), blockNumber.Int64(), "Failed to read BalanceAt", err.Error())
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, errMsg)
 		return nil, err
@@ -253,43 +246,41 @@ func (e EVM) BalanceAt(ctx context.Context, meta capabilities.RequestMetadata, r
 	return &pb.BalanceAtReply{Balance: balance}, nil
 }
 
-func (e EVM) EstimateGas(
-	ctx context.Context,
-	req capabilities.RequestMetadata,
-	input *pb.EstimateGasRequest,
-) (*pb.EstimateGasReply, error) {
-	// TODO: PLEX-1470 implement aggregatable method handling
-	read := monitoring.ReadRequest{TsStart: time.Now().UnixMilli(), RequestMetadata: req}
-
-	msg, err := pb.ConvertCallMsgFromProto(input.GetMsg())
+func (e EVM) EstimateGas(ctx context.Context, meta capabilities.RequestMetadata, req *pb.EstimateGasRequest) (*pb.EstimateGasReply, error) {
+	read := monitoring.ReadRequest{TsStart: time.Now().UnixMilli(), RequestMetadata: meta}
+	msg, err := pb.ConvertCallMsgFromProto(req.GetMsg())
 	if err != nil {
 		return nil, err
 	}
 
 	monitoring.EmitInitiated(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildEstimateGasInitiated(read, common.Bytes2Hex(msg.From[:]), common.Bytes2Hex(msg.To[:]), msg.Data))
-	estimate, err := e.EVMService.EstimateGas(ctx, msg)
+
+	request := ctypes.NewAggregatableRequest(requestID(meta), func(ctx context.Context) (*ctypes.AggregatableObservation, error) {
+		rawEstimate, err := e.EVMService.EstimateGas(ctx, msg)
+		if err != nil {
+			return nil, err
+		}
+
+		estimate := &valuespb.Decimal{
+			Coefficient: valuespb.NewBigIntFromInt(big.NewInt(0).SetUint64(rawEstimate)),
+			Exponent:    0,
+		}
+
+		return &ctypes.AggregatableObservation{
+			Method: ctypes.AggregationMethodFPlusOneHighest,
+			Value:  estimate,
+		}, nil
+	})
+
+	rawEstimate, err := readDecimal(ctx, e.ConsensusHandler, request)
 	if err != nil {
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildEstimateGasError(read, common.Bytes2Hex(msg.From[:]), common.Bytes2Hex(msg.To[:]), msg.Data, "Failed to execute EstimateGas", err.Error()))
 		return nil, err
 	}
 
-	// G115: integer overflow conversion uint64 -> int64 (gosec)
-	// nolint:gosec
-	monitoring.LogAndEmitSuccess(ctx, "Successfully read EstimateGas", e.lggr, e.beholderProcessor, e.messageBuilder.BuildEstimateGasSuccess(read, common.Bytes2Hex(msg.From[:]), common.Bytes2Hex(msg.To[:]), msg.Data, int64(estimate)))
-	return &pb.EstimateGasReply{Gas: estimate}, nil
-}
-func (e EVM) getReply(ctx context.Context, request ctypes.Request, into proto.Message) (err error) {
-	resultCh, err := e.ConsensusHandler.Handle(ctx, request)
-	if err != nil {
-		return err
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case data := <-resultCh:
-		return proto.Unmarshal(data, into)
-	}
+	logMsg := e.messageBuilder.BuildEstimateGasSuccess(read, common.Bytes2Hex(msg.From[:]), common.Bytes2Hex(msg.To[:]), msg.Data, rawEstimate.BigInt().Int64())
+	monitoring.LogAndEmitSuccess(ctx, "Successfully read EstimateGas", e.lggr, e.beholderProcessor, logMsg)
+	return &pb.EstimateGasReply{Gas: rawEstimate.BigInt().Uint64()}, nil
 }
 
 func (e EVM) GetTransactionByHash(ctx context.Context, meta capabilities.RequestMetadata, req *pb.GetTransactionByHashRequest) (*pb.GetTransactionByHashReply, error) {
@@ -298,7 +289,6 @@ func (e EVM) GetTransactionByHash(ctx context.Context, meta capabilities.Request
 	if err != nil {
 		return nil, err
 	}
-
 	monitoring.EmitInitiated(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildGetTransactionByHashInitiated(read, common.Bytes2Hex(hash[:])))
 	request := ctypes.NewEventuallyConsistentRequest(requestID(meta), func(ctx context.Context) ([]byte, error) {
 		tx, err := e.EVMService.GetTransactionByHash(ctx, hash)
@@ -315,7 +305,7 @@ func (e EVM) GetTransactionByHash(ctx context.Context, meta capabilities.Request
 	})
 
 	var tx pb.Transaction
-	if err := e.getReply(ctx, request, &tx); err != nil {
+	if err := e.readProto(ctx, request, &tx); err != nil {
 		errMsg := e.messageBuilder.BuildGetTransactionByHashError(read, common.Bytes2Hex(hash[:]), "Failed to execute GetTransactionByHash", err.Error())
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, errMsg)
 		return nil, err
@@ -348,7 +338,7 @@ func (e EVM) GetTransactionReceipt(ctx context.Context, meta capabilities.Reques
 	})
 
 	var receipt pb.Receipt
-	if err := e.getReply(ctx, request, &receipt); err != nil {
+	if err := e.readProto(ctx, request, &receipt); err != nil {
 		monitoring.LogAndEmitError(ctx, e.lggr, e.beholderProcessor, e.messageBuilder.BuildGetTransactionReceiptError(read, common.Bytes2Hex(hash[:]), "Failed to get latest and finalized head", err.Error()))
 		return nil, err
 	}
@@ -436,5 +426,42 @@ func getCallBlockNumber(requestedBlockNumber rpc.BlockNumber, chainHeight *ctype
 		return big.NewInt(chainHeight.Finalized), nil
 	default:
 		return nil, fmt.Errorf("unexpected block number %d", requestedBlockNumber)
+	}
+}
+
+func readDecimal(ctx context.Context, handler ConsensusHandler, request ctypes.Request) (decimal.Decimal, error) {
+	rawDecimal, err := readType[*valuespb.Decimal](ctx, handler, request)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+
+	return decimal.NewFromBigInt(valuespb.NewIntFromBigInt(rawDecimal.Coefficient), rawDecimal.Exponent), nil
+}
+
+func (e EVM) readProto(ctx context.Context, request ctypes.Request, into proto.Message) (err error) {
+	data, err := readType[[]byte](ctx, e.ConsensusHandler, request)
+	if err != nil {
+		return err
+	}
+	return proto.Unmarshal(data, into)
+}
+
+func readType[T any](ctx context.Context, reader ConsensusHandler, request ctypes.Request) (T, error) {
+	var zero T
+	resultCh, err := reader.Handle(ctx, request)
+	if err != nil {
+		return zero, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case rawData := <-resultCh:
+		data, ok := rawData.(T)
+		if !ok {
+			return zero, fmt.Errorf("unexpected result type: expected %T, got %T", zero, rawData)
+		}
+
+		return data, nil
 	}
 }
