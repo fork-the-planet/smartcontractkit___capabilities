@@ -19,15 +19,15 @@ import (
 
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/consensus/types"
 
-	evmcappb "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/chain-capabilities/evm"
-
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/actions"
 
 	"google.golang.org/protobuf/testing/protocmp"
 
+	evmcappb "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/chain-capabilities/evm"
+
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	evmtypes "github.com/smartcontractkit/chainlink-common/pkg/types/chains/evm"
-	valuespb "github.com/smartcontractkit/chainlink-common/pkg/values/pb"
+	valuespb "github.com/smartcontractkit/chainlink-protos/cre/go/values/pb"
 )
 
 func TestCapability_CallContract(t *testing.T) {
@@ -130,37 +130,62 @@ func TestCapability_FilterLogs(t *testing.T) {
 		svc := actions.InitMocks(t)
 
 		ch := make(chan types.Reply, 1)
-		expectedReply := &evmcappb.FilterLogsReply{Logs: []*evmcappb.Log{{Address: []byte("0xabc"), Data: []byte("0xdef")}}}
+		expectedReply := &evmcappb.FilterLogsReply{
+			Logs: []*evmcappb.Log{{Address: []byte("0xabc"), Data: []byte("0xdef")}},
+		}
 		logs, err := proto.Marshal(expectedReply)
 		require.NoError(t, err)
 		ch <- types.Reply{Value: logs}
 		svc.ConsensusHandler.EXPECT().Handle(mock.Anything, mock.Anything).Return(ch, nil).Once()
 
-		req := &evmcappb.FilterLogsRequest{FilterQuery: &evmcappb.FilterQuery{BlockHash: make([]byte, 32)}}
+		req := &evmcappb.FilterLogsRequest{
+			FilterQuery: &evmcappb.FilterQuery{
+				BlockHash: make([]byte, 32),
+				Topics:    []*evmcappb.Topics{},
+			},
+		}
 		resp, err := svc.FilterLogs(t.Context(), capabilities.RequestMetadata{}, req)
 		require.NoError(t, err)
 		require.Empty(t, cmp.Diff(expectedReply, resp.Response, protocmp.Transform()))
 		require.Empty(t, resp.ResponseMetadata.Metering, "FilterLogs() should have one metering entry (it won't be exposed in the capabilities interface)")
 	})
+
 	t.Run("Returns error if both block hash and block range is used", func(t *testing.T) {
 		svc := actions.InitMocks(t)
-		req := &evmcappb.FilterLogsRequest{FilterQuery: &evmcappb.FilterQuery{BlockHash: bytes.Repeat([]byte{1}, 32), FromBlock: valuespb.NewBigIntFromInt(big.NewInt(1))}}
+		req := &evmcappb.FilterLogsRequest{
+			FilterQuery: &evmcappb.FilterQuery{
+				BlockHash: bytes.Repeat([]byte{1}, 32),
+				FromBlock: valuespb.NewBigIntFromInt(big.NewInt(1)),
+				Topics:    []*evmcappb.Topics{},
+			},
+		}
 		_, err := svc.FilterLogs(t.Context(), capabilities.RequestMetadata{}, req)
 		require.ErrorContains(t, err, "cannot specify both block hash and block range")
 	})
+
 	t.Run("Returns error if block hash is of invalid length", func(t *testing.T) {
 		svc := actions.InitMocks(t)
-		req := &evmcappb.FilterLogsRequest{FilterQuery: &evmcappb.FilterQuery{BlockHash: make([]byte, 2)}}
+		req := &evmcappb.FilterLogsRequest{
+			FilterQuery: &evmcappb.FilterQuery{
+				BlockHash: make([]byte, 2),
+				Topics:    []*evmcappb.Topics{},
+			},
+		}
 		_, err := svc.FilterLogs(t.Context(), capabilities.RequestMetadata{}, req)
 		require.ErrorContains(t, err, "invalid hash: got 2 bytes, expected 32")
 	})
+
 	t.Run("Returns error on timeout", func(t *testing.T) {
 		svc := actions.InitMocks(t)
 
 		ch := make(chan types.Reply, 1)
 		svc.ConsensusHandler.EXPECT().Handle(mock.Anything, mock.Anything).Return(ch, nil).Once()
 
-		req := &evmcappb.FilterLogsRequest{FilterQuery: &evmcappb.FilterQuery{}}
+		req := &evmcappb.FilterLogsRequest{
+			FilterQuery: &evmcappb.FilterQuery{
+				Topics: []*evmcappb.Topics{},
+			},
+		}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		_, err := svc.FilterLogs(ctx, capabilities.RequestMetadata{}, req)
@@ -382,7 +407,11 @@ func TestCapability_HeaderByNumber(t *testing.T) {
 			Timestamp: 123,
 			Number:    block,
 		}
-		expectedReply := &evmcappb.HeaderByNumberReply{Header: evmcappb.ConvertHeaderToProto(header)}
+
+		h, err := evmcappb.ConvertHeaderToProto(&header)
+		require.NoError(t, err)
+
+		expectedReply := &evmcappb.HeaderByNumberReply{Header: h}
 		asProto, err := proto.Marshal(expectedReply)
 		require.NoError(t, err)
 		ch <- types.Reply{Value: asProto}

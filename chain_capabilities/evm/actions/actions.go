@@ -7,14 +7,9 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/shopspring/decimal"
-	valuespb "github.com/smartcontractkit/chainlink-common/pkg/values/pb"
-
-	"github.com/ethereum/go-ethereum/common"
-
-	"github.com/smartcontractkit/chainlink-common/pkg/types/query/primitives"
-
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/config"
@@ -22,14 +17,19 @@ import (
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/internal/contracts"
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/monitoring"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/types/query/primitives"
+
+	"google.golang.org/protobuf/proto"
+
 	"github.com/smartcontractkit/chainlink-common/pkg/beholder"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/chain-capabilities/evm"
-	"google.golang.org/protobuf/proto"
 
+	evmservice "github.com/smartcontractkit/chainlink-common/pkg/chains/evm"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
 	evmtypes "github.com/smartcontractkit/chainlink-common/pkg/types/chains/evm"
+	valuespb "github.com/smartcontractkit/chainlink-protos/cre/go/values/pb"
 
 	"github.com/smartcontractkit/capabilities/chain_capabilities/evm/metering"
 )
@@ -161,7 +161,12 @@ func (e EVM) filterLogsToRequest(meta capabilities.RequestMetadata, ethFilterQue
 			return nil, err
 		}
 
-		return proto.Marshal(&evm.FilterLogsReply{Logs: evm.ConvertLogsToProto(reply.Logs)})
+		logs, err := evm.ConvertLogsToProto(reply.Logs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert logs to proto: %w", err)
+		}
+
+		return proto.Marshal(&evm.FilterLogsReply{Logs: logs})
 	}
 
 	if ethFilterQuery.BlockHash != (evmtypes.Hash{}) {
@@ -364,7 +369,7 @@ func (e EVM) GetTransactionByHash(ctx context.Context, meta capabilities.Request
 		return nil, err
 	}
 	telemetryContext := monitoring.TelemetryContext{TsStart: time.Now().UnixMilli(), RequestMetadata: meta}
-	hash, err := evm.ConvertHashFromProto(req.GetHash())
+	hash, err := evmservice.ConvertHashFromProto(req.GetHash())
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +412,7 @@ func (e EVM) GetTransactionReceipt(ctx context.Context, meta capabilities.Reques
 		return nil, err
 	}
 	telemetryContext := monitoring.TelemetryContext{TsStart: time.Now().UnixMilli(), RequestMetadata: meta}
-	hash, err := evm.ConvertHashFromProto(req.GetHash())
+	hash, err := evmservice.ConvertHashFromProto(req.GetHash())
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +478,12 @@ func (e EVM) HeaderByNumber(
 			return nil, fmt.Errorf("header is nil")
 		}
 
-		return proto.Marshal(&evm.HeaderByNumberReply{Header: evm.ConvertHeaderToProto(*reply.Header)})
+		header, err := evm.ConvertHeaderToProto(reply.Header)
+		if err != nil {
+			return nil, err
+		}
+
+		return proto.Marshal(&evm.HeaderByNumberReply{Header: header})
 	}
 
 	var request ctypes.Request
