@@ -26,9 +26,11 @@ import (
 
 	httpcap "github.com/smartcontractkit/capabilities/http_action/action"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/beholder"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -192,7 +194,10 @@ func newTestGatewayConnector(t *testing.T, publicKey, nodeURL string, signer con
 
 // Helper to create and initialize the HTTP capability
 func newTestHTTPCapability(ctx context.Context, t *testing.T, gc core.GatewayConnector, lggr logger.Logger) server.ClientCapability {
-	httpCapability := httpcap.NewService(lggr)
+	httpCapability := httpcap.NewService(lggr, limits.Factory{
+		Logger: lggr,
+		Meter:  beholder.GetMeter(),
+	})
 	err := httpCapability.Initialise(ctx, serviceConfigTemplate, nil, nil, nil, nil, nil, nil, gc, nil)
 	require.NoError(t, err)
 	return httpCapability
@@ -294,14 +299,8 @@ func TestHTTPActionCapability(t *testing.T) {
 	client := &client{privateKey: privateKey}
 	gc := newTestGatewayConnector(t, publicKey, nodeURL, client, lggr)
 	httpCapability := newTestHTTPCapability(ctx, t, gc, lggr)
-
-	requestData := capabilities.RequestMetadata{
-		WorkflowOwner:       "workflow_owner",
-		WorkflowID:          "workflow_id",
-		WorkflowExecutionID: "workflow_execution_id",
-	}
 	t.Run("GET /test returns pong with custom header", func(t *testing.T) {
-		output, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		output, err := httpCapability.SendRequest(ctx, generateRandomRequestMetadata(), &httpclient.Request{
 			Url:     fmt.Sprintf("http://%s/test", listener.Addr().String()),
 			Method:  "GET",
 			Headers: map[string]string{"X-Test": "1"},
@@ -321,7 +320,7 @@ func TestHTTPActionCapability(t *testing.T) {
 			Headers: map[string]string{"X-Test": "1"},
 			Body:    []byte(`abc`),
 		}
-		output, err := httpCapability.SendRequest(ctx, requestData, input)
+		output, err := httpCapability.SendRequest(ctx, generateRandomRequestMetadata(), input)
 		require.NoError(t, err)
 		require.NotNil(t, output)
 		require.Equal(t, uint32(http.StatusOK), output.Response.StatusCode)
@@ -331,7 +330,8 @@ func TestHTTPActionCapability(t *testing.T) {
 	})
 
 	t.Run("GET /random with caching enabled", func(t *testing.T) {
-		initialOutput, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		requestMetadata := generateRandomRequestMetadata()
+		initialOutput, err := httpCapability.SendRequest(ctx, requestMetadata, &httpclient.Request{
 			Url:           fmt.Sprintf("http://%s/random", listener.Addr().String()),
 			Method:        "GET",
 			CacheSettings: &httpclient.CacheSettings{},
@@ -342,7 +342,7 @@ func TestHTTPActionCapability(t *testing.T) {
 		require.NotEmpty(t, initialOutput.Response.Body)
 		require.NotEmpty(t, initialOutput.Response.Headers["X-Custom-Header"])
 
-		cachedOutput, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		cachedOutput, err := httpCapability.SendRequest(ctx, requestMetadata, &httpclient.Request{
 			Url:    fmt.Sprintf("http://%s/random", listener.Addr().String()),
 			Method: "GET",
 			CacheSettings: &httpclient.CacheSettings{
@@ -356,7 +356,7 @@ func TestHTTPActionCapability(t *testing.T) {
 		require.NotEmpty(t, cachedOutput.Response.Body)
 		require.NotEmpty(t, cachedOutput.Response.Headers["X-Custom-Header"])
 
-		freshOutput, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		freshOutput, err := httpCapability.SendRequest(ctx, requestMetadata, &httpclient.Request{
 			Url:    fmt.Sprintf("http://%s/random", listener.Addr().String()),
 			Method: "GET",
 		})
@@ -373,7 +373,8 @@ func TestHTTPActionCapability(t *testing.T) {
 	})
 
 	t.Run("GET /not-found returns 404", func(t *testing.T) {
-		output, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		requestMetadata := generateRandomRequestMetadata()
+		output, err := httpCapability.SendRequest(ctx, requestMetadata, &httpclient.Request{
 			Url:           fmt.Sprintf("http://%s/not-found", listener.Addr().String()),
 			Method:        "GET",
 			CacheSettings: &httpclient.CacheSettings{},
@@ -383,7 +384,7 @@ func TestHTTPActionCapability(t *testing.T) {
 		require.Equal(t, uint32(http.StatusNotFound), output.Response.StatusCode)
 		require.Equal(t, string(output.Response.Body), "Not Found\n")
 
-		cachedOutput, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		cachedOutput, err := httpCapability.SendRequest(ctx, requestMetadata, &httpclient.Request{
 			Url:    fmt.Sprintf("http://%s/not-found", listener.Addr().String()),
 			Method: "GET",
 			CacheSettings: &httpclient.CacheSettings{
@@ -399,7 +400,7 @@ func TestHTTPActionCapability(t *testing.T) {
 	})
 
 	t.Run("GET /error returns 500", func(t *testing.T) {
-		output, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		output, err := httpCapability.SendRequest(ctx, generateRandomRequestMetadata(), &httpclient.Request{
 			Url:           fmt.Sprintf("http://%s/error", listener.Addr().String()),
 			Method:        "GET",
 			CacheSettings: &httpclient.CacheSettings{},
@@ -409,7 +410,7 @@ func TestHTTPActionCapability(t *testing.T) {
 		require.Equal(t, uint32(http.StatusInternalServerError), output.Response.StatusCode)
 		require.Equal(t, string(output.Response.Body), "Internal Server Error\n")
 
-		cachedOutput, err := httpCapability.SendRequest(ctx, requestData, &httpclient.Request{
+		cachedOutput, err := httpCapability.SendRequest(ctx, generateRandomRequestMetadata(), &httpclient.Request{
 			Url:    fmt.Sprintf("http://%s/error", listener.Addr().String()),
 			Method: "GET",
 			CacheSettings: &httpclient.CacheSettings{
@@ -423,4 +424,12 @@ func TestHTTPActionCapability(t *testing.T) {
 		require.Equal(t, string(cachedOutput.Response.Body), "Internal Server Error\n")
 		require.Equal(t, errorCounter, 2, "error endpoint should have been called twice. No caching on 500")
 	})
+}
+
+func generateRandomRequestMetadata() capabilities.RequestMetadata {
+	return capabilities.RequestMetadata{
+		WorkflowOwner:       fmt.Sprintf("owner_%s", uuid.New().String()),
+		WorkflowID:          fmt.Sprintf("workflow_%s", uuid.New().String()),
+		WorkflowExecutionID: fmt.Sprintf("execution_%s", uuid.New().String()),
+	}
 }

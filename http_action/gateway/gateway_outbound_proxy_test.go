@@ -12,16 +12,30 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/smartcontractkit/capabilities/http_action/common"
+	"github.com/smartcontractkit/capabilities/http_action/validate"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
+	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/ratelimit"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 
 	jsonrpc "github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 	gateway_common "github.com/smartcontractkit/chainlink-common/pkg/types/gateway"
 )
+
+func newTestValidator(t *testing.T) common.ResponseValidator {
+	lggr := logger.Test(t)
+	limitsFactory := limits.Factory{
+		Logger: lggr,
+	}
+
+	validator, err := validate.NewValidator(lggr, limitsFactory)
+	require.NoError(t, err)
+	return validator
+}
 
 func TestOutgoingConnectorHandler_AwaitConnection(t *testing.T) {
 	type testCase struct {
@@ -67,7 +81,7 @@ func TestOutgoingConnectorHandler_AwaitConnection(t *testing.T) {
 				mockConnector.GatewayIDsVal = []string{"gateway1", "gateway2"}
 			},
 			ctxSetup: func() context.Context {
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(t.Context())
 				cancel() // Cancel the context immediately
 				return ctx
 			},
@@ -86,7 +100,6 @@ func TestOutgoingConnectorHandler_AwaitConnection(t *testing.T) {
 
 			c := &gatewayOutboundProxy{
 				gatewayConnector: mockConnector,
-				selectorOpts:     []func(*gateway_common.RoundRobinSelector){gateway_common.WithFixedStart()},
 			}
 
 			ctx := tc.ctxSetup()
@@ -115,12 +128,11 @@ func setupSendRequestTest(t *testing.T) (*gatewayOutboundProxy, *mockGatewayConn
 	proxy, err := NewGatewayOutboundProxy(
 		mockConnector,
 		common.ServiceConfig{
-			OutgoingRateLimiter: rateLimiterConfig(),
 			IncomingRateLimiter: rateLimiterConfig(),
 		},
 		lggr,
 		newMetrics(t),
-		gateway_common.WithFixedStart(),
+		newTestValidator(t),
 	)
 	require.NoError(t, err)
 	return proxy, mockConnector, readyCh
@@ -155,7 +167,8 @@ func TestGatewayOutboundProxy_SendRequest_Success(t *testing.T) {
 		simulateGatewayMessage(t, proxy, id, 200, "ok", "", true)
 	}()
 
-	output, err := proxy.SendRequest(context.Background(), metadata, input)
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: metadata.WorkflowOwner, Workflow: metadata.WorkflowID})
+	output, err := proxy.SendRequest(ctx, metadata, input, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, output)
 	assert.Equal(t, uint32(200), output.StatusCode)
@@ -188,7 +201,7 @@ func TestGatewayOutboundProxy_SendRequest_MissingBodyToGateway(t *testing.T) {
 		simulateGatewayMessage(t, proxy, id, 200, "ok", "", false)
 	}()
 
-	_, err := proxy.SendRequest(context.Background(), metadata, input)
+	_, err := proxy.SendRequest(t.Context(), metadata, input, time.Now())
 	require.Error(t, err)
 }
 
@@ -211,7 +224,8 @@ func TestGatewayOutboundProxy_SendRequest_Timeout(t *testing.T) {
 
 	// Do not send a response, should timeout
 	start := time.Now()
-	output, err := proxy.SendRequest(context.Background(), metadata, input)
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: metadata.WorkflowOwner, Workflow: metadata.WorkflowID})
+	output, err := proxy.SendRequest(ctx, metadata, input, time.Now())
 	elapsed := time.Since(start)
 	require.Error(t, err)
 	require.Nil(t, output)
@@ -241,7 +255,8 @@ func TestGatewayOutboundProxy_SendRequest_ExecutionError(t *testing.T) {
 		simulateGatewayMessage(t, proxy, id, 500, "ok", "some error", true)
 	}()
 
-	output, err := proxy.SendRequest(context.Background(), metadata, input)
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: metadata.WorkflowOwner, Workflow: metadata.WorkflowID})
+	output, err := proxy.SendRequest(ctx, metadata, input, time.Now())
 	require.Error(t, err)
 	require.Nil(t, output)
 	assert.Equal(t, "internal error", err.Error())
@@ -269,7 +284,8 @@ func TestGatewayOutboundProxy_SendRequest_RateLimitError(t *testing.T) {
 		simulateGatewayMessage(t, proxy, id, 429, "", "global limit of outgoing gateways requests has been exceeded", true)
 	}()
 
-	output, err := proxy.SendRequest(context.Background(), metadata, input)
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: metadata.WorkflowOwner, Workflow: metadata.WorkflowID})
+	output, err := proxy.SendRequest(ctx, metadata, input, time.Now())
 	require.Error(t, err)
 	require.Nil(t, output)
 	assert.Contains(t, err.Error(), "internal error")
@@ -293,7 +309,7 @@ func simulateGatewayMessage(t *testing.T, proxy *gatewayOutboundProxy, id string
 		req.Params = &rj
 	}
 
-	err := proxy.HandleGatewayMessage(context.Background(), "gateway1", &req)
+	err := proxy.HandleGatewayMessage(t.Context(), "gateway1", &req)
 	require.NoError(t, err)
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http" // aliased below to avoid conflict
+	"time"
 
 	"github.com/doyensec/safeurl"
 	"github.com/google/uuid"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
-	"github.com/smartcontractkit/chainlink-common/pkg/ratelimit"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 )
 
@@ -22,51 +22,47 @@ var _ OutboundRequestClient = &httpClientProxy{}
 
 const ClientName = "HTTPClientProxy"
 
-var (
-	defaultAllowedPorts   = []int{80, 443}
-	defaultAllowedSchemes = []string{"http", "https"}
-)
-
 type OutboundRequestClient interface {
-	SendRequest(ctx context.Context, metadata capabilities.RequestMetadata, input *httpcap.Request) (*httpcap.Response, error)
+	SendRequest(ctx context.Context, metadata capabilities.RequestMetadata, input *httpcap.Request, startTime time.Time) (*httpcap.Response, error)
 	services.Service
+}
+
+// ResponseValidator is an interface for validating HTTP responses
+type ResponseValidator interface {
+	ValidateResponseSize(ctx context.Context, response []byte) error
 }
 
 // httpClientProxy implements OutboundRequestClient using a regular HTTP client
 type httpClientProxy struct {
-	client              *safeurl.WrappedClient
-	cfg                 ServiceConfig
-	outgoingRateLimiter *ratelimit.RateLimiter
-	lggr                logger.Logger
+	client    *safeurl.WrappedClient
+	cfg       ServiceConfig
+	lggr      logger.Logger
+	validator ResponseValidator
+	metrics   *Metrics
 }
 
 func disableRedirects(req *http.Request, via []*http.Request) error {
 	return errors.New("redirects are not allowed")
 }
 
-func NewHTTPClientProxy(cfg ServiceConfig, lggr logger.Logger) (*httpClientProxy, error) {
-	outgoingRateLimiter, err := ratelimit.NewRateLimiter(cfg.OutgoingRateLimiter)
-	if err != nil {
-		return nil, err
-	}
-
-	clientCfg := ApplyDefaults(&cfg.HTTPClientConfig)
+func NewHTTPClientProxy(cfg ServiceConfig, lggr logger.Logger, validator ResponseValidator, metrics *Metrics) (*httpClientProxy, error) {
 	safeConfig := safeurl.
 		GetConfigBuilder().
-		SetAllowedIPs(clientCfg.AllowedIPs...).
-		SetAllowedIPsCIDR(clientCfg.AllowedIPsCIDR...).
-		SetAllowedPorts(clientCfg.AllowedPorts...).
-		SetAllowedSchemes(clientCfg.AllowedSchemes...).
-		SetBlockedIPs(clientCfg.BlockedIPs...).
-		SetBlockedIPsCIDR(clientCfg.BlockedIPsCIDR...).
+		SetAllowedIPs(cfg.HTTPClientConfig.AllowedIPs...).
+		SetAllowedIPsCIDR(cfg.HTTPClientConfig.AllowedIPsCIDR...).
+		SetAllowedPorts(cfg.HTTPClientConfig.AllowedPorts...).
+		SetAllowedSchemes(cfg.HTTPClientConfig.AllowedSchemes...).
+		SetBlockedIPs(cfg.HTTPClientConfig.BlockedIPs...).
+		SetBlockedIPsCIDR(cfg.HTTPClientConfig.BlockedIPsCIDR...).
 		SetCheckRedirect(disableRedirects).
 		Build()
 
 	return &httpClientProxy{
-		cfg:                 cfg,
-		client:              safeurl.Client(safeConfig),
-		outgoingRateLimiter: outgoingRateLimiter,
-		lggr:                lggr,
+		cfg:       cfg,
+		client:    safeurl.Client(safeConfig),
+		lggr:      lggr,
+		validator: validator,
+		metrics:   metrics,
 	}, nil
 }
 
@@ -78,38 +74,40 @@ func headers(req *httpcap.Request) map[string][]string {
 	return headers
 }
 
-func (h *httpClientProxy) SendRequest(ctx context.Context, metadata capabilities.RequestMetadata, input *httpcap.Request) (*httpcap.Response, error) {
+func (h *httpClientProxy) SendRequest(ctx context.Context, metadata capabilities.RequestMetadata, input *httpcap.Request, startTime time.Time) (*httpcap.Response, error) {
 	requestID := uuid.New().String()
 	lggr := logger.With(h.lggr, "requestID", requestID, "workflowID", metadata.WorkflowID, "workflowExecutionID", metadata.WorkflowExecutionID, "workflowOwner", metadata.WorkflowOwner)
-
-	workflowAllow, globalAllow := h.outgoingRateLimiter.AllowVerbose(metadata.WorkflowOwner)
-	if !workflowAllow {
-		return nil, errors.New(ErrorOutgoingRatelimitWorkflowOwner)
-	}
-	if !globalAllow {
-		return nil, errors.New(ErrorOutgoingRatelimitGlobal)
-	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, input.Timeout.AsDuration())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(timeoutCtx, input.Method, input.Url, bytes.NewReader(input.Body))
 	if err != nil {
+		h.metrics.IncrementExecutionError(ctx, ProxyModeDirect, lggr)
 		return nil, err
 	}
 
 	req.Header = http.Header(headers(input))
 
 	lggr.Debugw("Sending HTTP request")
+	externalStartTime := time.Now()
 	resp, err := h.client.Do(req)
 	if err != nil {
+		h.metrics.IncrementExternalEndpointError(ctx, ProxyModeDirect, lggr)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	externalLatency := time.Since(externalStartTime).Milliseconds()
 	lggr.Debugw("Received HTTP response", "status", resp.Status, "statusCode", resp.StatusCode)
-	limited := io.LimitReader(resp.Body, int64(h.cfg.LimitsConfig.MaxResponseBytes))
-	body, err := io.ReadAll(limited)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		h.metrics.IncrementExternalEndpointError(ctx, ProxyModeDirect, lggr)
+		return nil, err
+	}
+
+	if err := h.validator.ValidateResponseSize(ctx, body); err != nil {
+		h.metrics.IncrementExternalEndpointError(ctx, ProxyModeDirect, lggr)
 		return nil, err
 	}
 
@@ -126,6 +124,9 @@ func (h *httpClientProxy) SendRequest(ctx context.Context, metadata capabilities
 		Headers:    headers,
 		Body:       body,
 	}
+	totalLatency := time.Since(startTime).Milliseconds()
+	h.metrics.RecordRequestLatency(ctx, totalLatency, externalLatency, ProxyModeDirect, lggr)
+
 	return outputs, nil
 }
 
@@ -147,18 +148,4 @@ func (h *httpClientProxy) Name() string {
 
 func (h *httpClientProxy) Ready() error {
 	return nil
-}
-
-func ApplyDefaults(c *HTTPClientConfig) *HTTPClientConfig {
-	if len(c.AllowedPorts) == 0 {
-		c.AllowedPorts = defaultAllowedPorts
-	}
-
-	if len(c.AllowedSchemes) == 0 {
-		c.AllowedSchemes = defaultAllowedSchemes
-	}
-
-	// safeurl automatically blocks internal IPs so no need
-	// to set defaults here.
-	return c
 }

@@ -133,12 +133,15 @@ func setup(t *testing.T, lggr logger.Logger) (*connectorHandler, *mockGatewayCon
 	orl, err := ratelimit.NewRateLimiter(rateLimiterConfig())
 	require.NoError(t, err)
 	store := newWorkflowStore(lggr)
+	metrics, err := NewMetrics()
+	require.NoError(t, err)
 	metadataPublisher := NewGatewayMetadataPublisher(
 		lggr,
 		mockConnector,
 		orl,
 		store,
 		cfg,
+		metrics,
 	)
 	kvstore := newTestKVStore()
 	requestCache := newRequestCache(logger.Sugared(lggr), kvstore, time.Hour)
@@ -505,12 +508,15 @@ func TestRegisterWorkflow_TooManyAuthorizedKeys(t *testing.T) {
 	orl, err := ratelimit.NewRateLimiter(rateLimiterConfig())
 	require.NoError(t, err)
 	store := newWorkflowStore(lggr)
+	metrics, err := NewMetrics()
+	require.NoError(t, err)
 	metadataPublisher := NewGatewayMetadataPublisher(
 		lggr,
 		mockConnector,
 		orl,
 		store,
 		cfg,
+		metrics,
 	)
 	kvstore := newTestKVStore()
 	requestCache := newRequestCache(logger.Sugared(lggr), kvstore, time.Hour)
@@ -613,12 +619,15 @@ func TestConnectorHandler_Start_HealthReport_Ready_Name_Close(t *testing.T) {
 	orl, err := ratelimit.NewRateLimiter(rateLimiterConfig())
 	require.NoError(t, err)
 	store := newWorkflowStore(lggr)
+	metrics, err := NewMetrics()
+	require.NoError(t, err)
 	metadataPublisher := NewGatewayMetadataPublisher(
 		lggr,
 		mockConnector,
 		orl,
 		store,
 		cfg,
+		metrics,
 	)
 	kvstore := newTestKVStore()
 	requestCache := newRequestCache(logger.Sugared(lggr), kvstore, time.Hour)
@@ -771,12 +780,15 @@ func TestHandleGatewayMessage_PullAuthMetadata_EmptyWorkflows(t *testing.T) {
 	orl, err := ratelimit.NewRateLimiter(rateLimiterConfig())
 	require.NoError(t, err)
 	store := newWorkflowStore(lggr)
+	metrics, err := NewMetrics()
+	require.NoError(t, err)
 	metadataPublisher := NewGatewayMetadataPublisher(
 		lggr,
 		mockConnector,
 		orl,
 		store,
 		cfg,
+		metrics,
 	)
 	kvstore := newTestKVStore()
 	requestCache := newRequestCache(logger.Sugared(lggr), kvstore, time.Hour)
@@ -864,12 +876,15 @@ func TestConnectorHandler_StartRequestCacheCleanup(t *testing.T) {
 	orl, err := ratelimit.NewRateLimiter(rateLimiterConfig())
 	require.NoError(t, err)
 	store := newWorkflowStore(lggr)
+	metrics, err := NewMetrics()
+	require.NoError(t, err)
 	metadataPublisher := NewGatewayMetadataPublisher(
 		lggr,
 		mockConnector,
 		orl,
 		store,
 		cfg,
+		metrics,
 	)
 
 	shortTTL := 10 * time.Millisecond
