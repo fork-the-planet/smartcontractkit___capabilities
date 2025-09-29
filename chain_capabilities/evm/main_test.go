@@ -33,7 +33,7 @@ func TestCapabilityGRPCService_Initialise(t *testing.T) {
 		relayerSet := relayermock.NewRelayerSet(t)
 		relayerSet.On("Get", mock.Anything, mock.Anything).Return(relayer, nil)
 		svc := &capabilityGRPCService{lggr: logger.Test(t)}
-		cfg := config.Config{ChainID: 1337, Network: "testnet", LogTriggerPollInterval: 60 * time.Second, CREForwarderAddress: common.Bytes2Hex(testutils.NewAddress().Bytes()), ReceiverGasMinimum: 1000}
+		cfg := config.Config{ChainID: 1337, Network: "testnet", LogTriggerPollInterval: 60 * time.Second, CREForwarderAddress: testutils.NewAddress().String(), ReceiverGasMinimum: 1000}
 		cfgJSON, _ := json.Marshal(cfg)
 
 		err := svc.Initialise(t.Context(), string(cfgJSON),
@@ -78,7 +78,7 @@ func TestCapabilityGRPCService_Initialise(t *testing.T) {
 		cfg := config.Config{ChainID: 1337, Network: "testnet", LogTriggerPollInterval: -1, CREForwarderAddress: common.Bytes2Hex(testutils.NewAddress().Bytes()), ReceiverGasMinimum: 1000}
 		cfgJSON, _ := json.Marshal(cfg)
 		err := svc.Initialise(t.Context(), string(cfgJSON), nil, nil, nil, nil, relayerSet, nullOracleFactory{}, nil, nil)
-		assert.ErrorContains(t, err, "error when creating trigger: logTriggerPollInterval must be positive, got: -1ns")
+		assert.ErrorContains(t, err, "failed to unmarshal config: logTriggerPollInterval must be positive, got: -1ns")
 
 		cfg = config.Config{ChainID: 1337, Network: "testnet", LogTriggerPollInterval: 60 * time.Second, CREForwarderAddress: common.Bytes2Hex(testutils.NewAddress().Bytes()), ReceiverGasMinimum: 1000, LogTriggerLimitQueryLogSize: uint64(1001)}
 		cfgJSON, _ = json.Marshal(cfg)
@@ -95,7 +95,7 @@ func TestCapabilityGRPCService_Initialise(t *testing.T) {
 		relayerSet := relayermock.NewRelayerSet(t)
 		relayerSet.On("Get", mock.Anything, mock.Anything).Return(nil, assert.AnError)
 
-		cfgJSON, _ := json.Marshal(config.Config{ChainID: 1, Network: "net", LogTriggerPollInterval: 60 * time.Second, CREForwarderAddress: common.Bytes2Hex(testutils.NewAddress().Bytes()), ReceiverGasMinimum: 1000})
+		cfgJSON, _ := json.Marshal(config.Config{ChainID: 1, Network: "net", LogTriggerPollInterval: 60 * time.Second, CREForwarderAddress: testutils.NewAddress().String(), ReceiverGasMinimum: 1000})
 		svc := &capabilityGRPCService{lggr: logger.Test(t)}
 
 		err := svc.Initialise(t.Context(), string(cfgJSON),
@@ -104,27 +104,21 @@ func TestCapabilityGRPCService_Initialise(t *testing.T) {
 	})
 	t.Run("Misconfiguration", func(t *testing.T) {
 		t.Run("No Keystone forwarder address provided", func(t *testing.T) {
-			relayerSet := relayermock.NewRelayerSet(t)
-			relayerSet.On("Get", mock.Anything, mock.Anything).Return(nil, assert.AnError)
-
 			cfgJSON, _ := json.Marshal(config.Config{ChainID: 1, Network: "net", ReceiverGasMinimum: 1000})
 			svc := &capabilityGRPCService{lggr: logger.Test(t)}
 
 			err := svc.Initialise(t.Context(), string(cfgJSON),
-				nil, nil, nil, nil, relayerSet, nil, nil, nil)
-			assert.ErrorIs(t, err, assert.AnError)
+				nil, nil, nil, nil, nil, nil, nil, nil)
+			assert.ErrorContains(t, err, "invalid cre forward address, it does not have 20 characters")
 		})
 
 		t.Run("ReceiverGasConfig zero", func(t *testing.T) {
-			relayerSet := relayermock.NewRelayerSet(t)
-			relayerSet.On("Get", mock.Anything, mock.Anything).Return(nil, assert.AnError)
-
-			cfgJSON, _ := json.Marshal(config.Config{ChainID: 1, Network: "net", ReceiverGasMinimum: 1000})
+			cfgJSON, _ := json.Marshal(config.Config{ChainID: 1, Network: "net", ReceiverGasMinimum: 0, CREForwarderAddress: testutils.NewAddress().String()})
 			svc := &capabilityGRPCService{lggr: logger.Test(t)}
 
 			err := svc.Initialise(t.Context(), string(cfgJSON),
-				nil, nil, nil, nil, relayerSet, nil, nil, nil)
-			assert.ErrorIs(t, err, assert.AnError)
+				nil, nil, nil, nil, nil, nil, nil, nil)
+			assert.ErrorContains(t, err, "invalid ReceiverGasMinimum value. It must be greater than 0. Provided ReceiverGasMinimum 0")
 		})
 	})
 }
