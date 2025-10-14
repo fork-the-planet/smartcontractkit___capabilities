@@ -429,7 +429,7 @@ func newCrWithObsAndDef(observation int64, def int64, metaData oracle.ConsensusR
 
 func runProtocolRoundTests(ctx context.Context, t *testing.T, lggr logger.Logger, n, f, batchSize int, reqToObservations map[string]consensusPluginTest) {
 	var reportingPlugins []ocr3types.ReportingPlugin[[]byte]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		pluginObs := []*oracle.ConsensusRequest{}
 
 		for _, obsData := range reqToObservations {
