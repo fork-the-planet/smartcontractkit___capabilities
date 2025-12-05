@@ -41,7 +41,7 @@ func TestCREForwarderClient_GetTransmissionInfo(t *testing.T) {
 	t.Run("Get Transmission info - Successfully get transmission info", func(t *testing.T) {
 		mockEVMService := mocks2.NewEVMService(t)
 		mockEVMService.EXPECT().HeaderByNumber(mock.Anything, mock.Anything).Return(&evmtypes.HeaderByNumberReply{Header: &evmtypes.Header{Number: big.NewInt(100)}}, nil).Maybe()
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 
 		expectedTransmissionInfo := contracts.TransmissionInfo{
 			State:           2,
@@ -74,7 +74,7 @@ func TestCREForwarderClient_GetTransmissionInfo(t *testing.T) {
 	})
 	t.Run("Get Transmission info - Fail calling CallContract ", func(t *testing.T) {
 		mockEVMService := mocks2.NewEVMService(t)
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 
 		transmissionID := contracts.TransmissionID{
 			Receiver:            common.BytesToAddress(test.RandomBytes(20)),
@@ -98,7 +98,7 @@ func TestCREForwarderClient_GetTransmissionInfo(t *testing.T) {
 	})
 	t.Run("Get Transmission info - Fail decoding data from call contract", func(t *testing.T) {
 		mockEVMService := mocks2.NewEVMService(t)
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 
 		transmissionID := contracts.TransmissionID{
 			Receiver:            common.BytesToAddress(test.RandomBytes(20)),
@@ -135,7 +135,7 @@ func TestCREForwarderClient_GetReportProcessedEvents(t *testing.T) {
 	t.Run("Get Transmission info - Successfully get transmission info", func(t *testing.T) {
 		mockEVMService := mocks2.NewEVMService(t)
 		mockEVMService.EXPECT().HeaderByNumber(mock.Anything, mock.Anything).Return(&evmtypes.HeaderByNumberReply{Header: &evmtypes.Header{Number: big.NewInt(100)}}, nil).Maybe()
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 		mockLogs := []*evm.Log{{
 			TxHash: expectedHash,
 		}}
@@ -149,7 +149,7 @@ func TestCREForwarderClient_GetReportProcessedEvents(t *testing.T) {
 	t.Run("Get Transmission info - Error calling FilterLogs", func(t *testing.T) {
 		mockEVMService := mocks2.NewEVMService(t)
 		mockEVMService.EXPECT().HeaderByNumber(mock.Anything, mock.Anything).Return(&evmtypes.HeaderByNumberReply{Header: &evmtypes.Header{Number: big.NewInt(100)}}, nil).Maybe()
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 		expectedError := "fail calling EVM FilterLogs"
 		mockEVMService.EXPECT().FilterLogs(ctx, mock.Anything).Return(nil, errors.New(expectedError))
 
@@ -193,7 +193,7 @@ func TestCREForwarderClient_InvokeOnReport(t *testing.T) {
 		expectedEncodedReport := testEncoder.encodeReport(receiverAddress, report)
 
 		mockEVMService := mocks2.NewEVMService(t)
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 		expectedGasLimit := uint64(100)
 		txHash := evmtypes.Hash(test.RandomBytes(32))
 
@@ -226,7 +226,7 @@ func TestCREForwarderClient_InvokeOnReport(t *testing.T) {
 		expectedEncodedReport := testEncoder.encodeReport(receiverAddress, report)
 
 		mockEVMService := mocks2.NewEVMService(t)
-		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+		forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 		expectedGasLimit := uint64(100)
 		expectedError := "some random error sending TX"
 
@@ -244,9 +244,60 @@ func TestCREForwarderClient_InvokeOnReport(t *testing.T) {
 	})
 }
 
+func TestNewCREForwarderClient_LookbackConfig(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	testLogger := logger.Test(t)
+	forwarderAddress := common.BytesToAddress(test.RandomBytes(20))
+
+	t.Run("forwarderLookbackBlocks defaults when set to 0", func(t *testing.T) {
+		mockEVMService := mocks2.NewEVMService(t)
+		latest := big.NewInt(150)
+		mockEVMService.EXPECT().
+			HeaderByNumber(mock.Anything, mock.Anything).
+			Return(&evmtypes.HeaderByNumberReply{Header: &evmtypes.Header{Number: latest}}, nil).
+			Once()
+
+		forwarderClient, err := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, 0, testLogger)
+		require.NoError(t, err)
+
+		mockEVMService.EXPECT().
+			FilterLogs(ctx, mock.MatchedBy(func(req evmtypes.FilterLogsRequest) bool {
+				// FromBlock 50 == 150 - 100 (default value) = 90
+				return big.NewInt(50).Cmp(req.FilterQuery.FromBlock) == 0
+			})).
+			Return(&evmtypes.FilterLogsReply{Logs: []*evm.Log{}}, nil)
+
+		_, err = forwarderClient.GetReportProcessedEvents(ctx, common.BytesToAddress(test.RandomBytes(20)), [32]byte(test.RandomBytes(32)), [2]byte(test.RandomBytes(2)))
+		require.NoError(t, err)
+	})
+
+	t.Run("forwarderLookbackBlocks remains when set to 10", func(t *testing.T) {
+		mockEVMService := mocks2.NewEVMService(t)
+		latest := big.NewInt(100)
+		mockEVMService.EXPECT().
+			HeaderByNumber(mock.Anything, mock.Anything).
+			Return(&evmtypes.HeaderByNumberReply{Header: &evmtypes.Header{Number: latest}}, nil).
+			Once()
+
+		forwarderClient, err := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, 10, testLogger)
+		require.NoError(t, err)
+
+		mockEVMService.EXPECT().
+			FilterLogs(ctx, mock.MatchedBy(func(req evmtypes.FilterLogsRequest) bool {
+				// FromBlock 90 == 100 - 10 = 90
+				return big.NewInt(90).Cmp(req.FilterQuery.FromBlock) == 0
+			})).
+			Return(&evmtypes.FilterLogsReply{Logs: []*evm.Log{}}, nil)
+
+		_, err = forwarderClient.GetReportProcessedEvents(ctx, common.BytesToAddress(test.RandomBytes(20)), [32]byte(test.RandomBytes(32)), [2]byte(test.RandomBytes(2)))
+		require.NoError(t, err)
+	})
+}
+
 func testSuccessfulReportSubmissionAndEncoding(ctx context.Context, t *testing.T, forwarderAddress common.Address, testLogger logger.Logger, expectedEncodedReport []byte, receiverAddress common.Address, report *workflowpb.ReportResponse) {
 	mockEVMService := mocks2.NewEVMService(t)
-	forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, testLogger)
+	forwarderClient, _ := contracts.NewCREForwarderClient(mockEVMService, forwarderAddress, contracts.DefaultLookbackBlocks, testLogger)
 	expectedGasLimit := uint64(100)
 	txHash := evmtypes.Hash(test.RandomBytes(32))
 
