@@ -31,6 +31,9 @@ type Metrics struct {
 	WriteReportTxFeeCalculationError struct {
 		basic commoncapbeholder.MetricsCapBasic
 	}
+	WriteReportInvalidTransmissionState struct {
+		basic commoncapbeholder.MetricsCapBasic
+	}
 	LogTriggerSuccess struct {
 		basic commoncapbeholder.MetricsCapBasic
 	}
@@ -112,6 +115,11 @@ func NewMetrics() (Metrics, error) {
 	m.WriteReportTxFeeCalculationError.basic, err = commoncapbeholder.NewMetricsCapBasic(wrTxFeeErr)
 	if err != nil {
 		return Metrics{}, fmt.Errorf("failed to create write report tx fee calculation error metric: %w", err)
+	}
+	wrInvalidState := commoncapbeholder.NewMetricsInfoCapBasic(ns("write_report_invalid_transmission_state"), commonbeholder.ToSchemaFullName(&WriteReportInvalidTransmissionState{}))
+	m.WriteReportInvalidTransmissionState.basic, err = commoncapbeholder.NewMetricsCapBasic(wrInvalidState)
+	if err != nil {
+		return Metrics{}, fmt.Errorf("failed to create write report invalid transmission state metric: %w", err)
 	}
 
 	// -- LogTrigger --
@@ -242,6 +250,12 @@ func (m *Metrics) OnWriteReportError(ctx context.Context, msg *WriteReportError)
 func (m *Metrics) OnWriteReportTxFeeCalculationError(ctx context.Context, msg *WriteReportTxFeeCalculationError) error {
 	start, emit := msg.ExecutionContext.MetaCapabilityTimestampStart, msg.ExecutionContext.MetaCapabilityTimestampEmit
 	m.WriteReportTxFeeCalculationError.basic.RecordEmit(ctx, start, emit, msg.MetricAttributes()...)
+	return nil
+}
+
+func (m *Metrics) OnWriteReportInvalidTransmissionState(ctx context.Context, msg *WriteReportInvalidTransmissionState) error {
+	start, emit := msg.ExecutionContext.MetaCapabilityTimestampStart, msg.ExecutionContext.MetaCapabilityTimestampEmit
+	m.WriteReportInvalidTransmissionState.basic.RecordEmit(ctx, start, emit, msg.MetricAttributes()...)
 	return nil
 }
 
@@ -413,6 +427,26 @@ func (r *WriteReportTxFeeCalculationError) LogAttributes() []attribute.KeyValue 
 }
 
 func (r *WriteReportTxFeeCalculationError) MetricAttributes() []attribute.KeyValue {
+	return r.ExecutionContext.MetricsAttributes()
+}
+
+func (r *WriteReportInvalidTransmissionState) LogAttributes() []attribute.KeyValue {
+	attributes := []attribute.KeyValue{
+		attribute.String("summary", r.GetSummary()),
+		attribute.Int64("transmission_state", int64(r.GetTransmissionState())),
+		attribute.Bool("invalid_receiver", r.GetInvalidReceiver()),
+		attribute.Bool("success", r.GetSuccess()),
+	}
+	if r.GetTransmissionId() != "" {
+		attributes = append(attributes, attribute.String("transmission_id", r.GetTransmissionId()))
+	}
+	if r.GetTransmitter() != "" {
+		attributes = append(attributes, attribute.String("transmitter", r.GetTransmitter()))
+	}
+	return append(attributes, r.ExecutionContext.LogAttributes()...)
+}
+
+func (r *WriteReportInvalidTransmissionState) MetricAttributes() []attribute.KeyValue {
 	return r.ExecutionContext.MetricsAttributes()
 }
 

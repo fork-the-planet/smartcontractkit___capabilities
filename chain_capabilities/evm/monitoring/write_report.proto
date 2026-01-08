@@ -32,6 +32,18 @@ message WriteReportTxFeeCalculationError {
   monitoring.ExecutionContext execution_context = 20;
 }
 
+message WriteReportInvalidTransmissionState {
+  WriteReportRequest req = 1;
+  string summary = 2;
+  string cause = 3;
+  uint32 transmission_state = 4;
+  bool invalid_receiver = 5;
+  bool success = 6;
+  string transmission_id = 7;
+  string transmitter = 8;
+  monitoring.ExecutionContext execution_context = 20;
+}
+
 message WriteReportRequest {
   bytes receiver = 1;
   ReportResponse report = 2;
