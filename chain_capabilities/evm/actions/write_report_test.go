@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
@@ -45,6 +46,189 @@ const (
 func nonNilPositiveGasCfgMatcher() interface{} {
 	return mock.MatchedBy(func(gc *evm.GasConfig) bool {
 		return gc != nil && gc.GasLimit > 0
+	})
+}
+
+func TestWithQuickRetry(t *testing.T) {
+	t.Parallel()
+	lggr := logger.Test(t)
+
+	t.Run("retries until success", func(t *testing.T) {
+		ctx := t.Context()
+		attempts := 0
+
+		result, err := withQuickRetry(ctx, lggr, func(ctx context.Context) (string, error) {
+			attempts++
+			if attempts < 3 {
+				return "", errors.New("transient error")
+			}
+			return "success after retries", nil
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, "success after retries", result)
+		require.Equal(t, 3, attempts)
+	})
+
+	t.Run("respects parent context timeout", func(t *testing.T) {
+		// Parent context with 200ms timeout - shorter than withQuickRetry's 10s
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		_, err := withQuickRetry(ctx, lggr, func(ctx context.Context) (string, error) {
+			return "", errors.New("always fails")
+		})
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		// Should complete within parent timeout + some margin
+		require.Less(t, elapsed, 500*time.Millisecond, "should respect parent context timeout")
+	})
+
+	t.Run("returns original error not context deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+
+		expectedErr := "specific RPC error"
+		_, err := withQuickRetry(ctx, lggr, func(ctx context.Context) (string, error) {
+			return "", errors.New(expectedErr)
+		})
+
+		require.Error(t, err)
+		require.Equal(t, expectedErr, err.Error())
+		require.NotContains(t, err.Error(), "context deadline exceeded")
+	})
+
+	t.Run("makes multiple retry attempts with backoff", func(t *testing.T) {
+		// Use a 1s parent timeout to keep test fast
+		ctx, cancel := context.WithTimeout(t.Context(), 1*time.Second)
+		defer cancel()
+
+		attempts := 0
+		_, err := withQuickRetry(ctx, lggr, func(ctx context.Context) (string, error) {
+			attempts++
+			return "", errors.New("always fails")
+		})
+
+		require.Error(t, err)
+		// With 1s timeout and 100ms initial backoff, should get several attempts
+		// (100ms + 200ms + 400ms = 700ms for 3 retries, then timeout)
+		require.GreaterOrEqual(t, attempts, 3, "should make multiple retry attempts")
+		require.LessOrEqual(t, attempts, 6, "should be bounded by timeout")
+	})
+
+	t.Run("with cancelled context returns original error from fn", func(t *testing.T) {
+		// Create an already-cancelled context
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel immediately
+
+		expectedErr := "fn error"
+		_, err := withQuickRetry(ctx, lggr, func(ctx context.Context) (string, error) {
+			return "", errors.New(expectedErr)
+		})
+
+		require.Error(t, err)
+		// The retry strategy calls fn at least once before checking context.
+		// Since fn returns an error, lastErr is set, and we return the original error.
+		require.Equal(t, expectedErr, err.Error())
+	})
+}
+
+func TestWithPollingRetry(t *testing.T) {
+	t.Parallel()
+	lggr := logger.Test(t)
+
+	t.Run("retries until success", func(t *testing.T) {
+		ctx := t.Context()
+		attempts := 0
+
+		result, err := withPollingRetry(ctx, lggr, func(ctx context.Context) (int, error) {
+			attempts++
+			if attempts < 4 {
+				return 0, errors.New("not ready yet")
+			}
+			return 100, nil
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, 100, result)
+		require.Equal(t, 4, attempts)
+	})
+
+	t.Run("respects parent context timeout", func(t *testing.T) {
+		// Parent context with 300ms timeout - shorter than withPollingRetry's 60s
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		_, err := withPollingRetry(ctx, lggr, func(ctx context.Context) (int, error) {
+			return 0, errors.New("always fails")
+		})
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		// Should complete within parent timeout + some margin
+		require.Less(t, elapsed, 600*time.Millisecond, "should respect parent context timeout")
+	})
+
+	t.Run("returns original error not context deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+		defer cancel()
+
+		expectedErr := "chain state not updated"
+		_, err := withPollingRetry(ctx, lggr, func(ctx context.Context) (int, error) {
+			return 0, errors.New(expectedErr)
+		})
+
+		require.Error(t, err)
+		require.Equal(t, expectedErr, err.Error())
+		require.NotContains(t, err.Error(), "context deadline exceeded")
+	})
+
+	t.Run("uses longer backoff than quick retry", func(t *testing.T) {
+		ctx := t.Context()
+		attempts := 0
+		var timestamps []time.Time
+
+		start := time.Now()
+		_, _ = withPollingRetry(ctx, lggr, func(ctx context.Context) (int, error) {
+			attempts++
+			timestamps = append(timestamps, time.Now())
+			if attempts >= 4 {
+				return 1, nil // succeed to stop
+			}
+			return 0, errors.New("not ready")
+		})
+
+		// Verify backoff is happening (gaps should increase)
+		if len(timestamps) >= 3 {
+			gap1 := timestamps[1].Sub(timestamps[0])
+			gap2 := timestamps[2].Sub(timestamps[1])
+			// Second gap should be roughly 2x the first (exponential backoff)
+			// Allow some tolerance for timing variations
+			require.Greater(t, gap2, gap1/2, "backoff should be exponential")
+		}
+
+		totalTime := time.Since(start)
+		// Should complete reasonably fast with just 4 attempts
+		require.Less(t, totalTime, 2*time.Second)
+	})
+
+	t.Run("with cancelled context returns original error from fn", func(t *testing.T) {
+		// Create an already-cancelled context
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel immediately
+
+		expectedErr := "fn error"
+		_, err := withPollingRetry(ctx, lggr, func(ctx context.Context) (int, error) {
+			return 0, errors.New(expectedErr)
+		})
+
+		require.Error(t, err)
+		// The retry strategy calls fn at least once before checking context.
+		// Since fn returns an error, lastErr is set, and we return the original error.
+		require.Equal(t, expectedErr, err.Error())
 	})
 }
 
@@ -195,17 +379,19 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 	})
 
 	t.Run("Fail while getting transmission info", func(t *testing.T) {
-		ctx := t.Context()
+		// Short timeout so quick retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
 		testLogger := logger.Test(t)
 		_, mockForwarderClient, service := createMocksAndCapability(t, testLogger)
 
 		errorMsg := "some error"
-		expectedError := "[2]Unknown: some error"
+		expectedError := "[2]Unknown: failed to get transmission info: some error"
 
+		// Will be retried until context timeout
 		mockForwarderClient.
 			On("GetTransmissionInfo", mock.Anything, mock.Anything).
-			Return(contracts.TransmissionInfo{}, errors.New(errorMsg)).
-			Once()
+			Return(contracts.TransmissionInfo{}, errors.New(errorMsg))
 
 		reportMetadata := createTestReportMetadata()
 		encodedReportMetadata, _ := reportMetadata.Encode()
@@ -220,6 +406,8 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Equal(t, expectedError, err.Error())
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
 	})
 
 	t.Run("TX already transmitted successfully", func(t *testing.T) {
@@ -280,7 +468,9 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 	})
 
 	t.Run("TX already transmitted successfully - Failed to fetch report emitted log", func(t *testing.T) {
-		ctx := t.Context()
+		// Short timeout so polling retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
 		testLogger := logger.Test(t)
 		_, mockForwarderClient, service := createMocksAndCapability(t, testLogger)
 
@@ -289,8 +479,9 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 			InvalidReceiver: false,
 			State:           TransmissionStateSucceeded,
 		}
-		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, mock.Anything).Return(transmissionInfo, nil).Once()
+		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, mock.Anything).Return(transmissionInfo, nil)
 
+		// Will be retried until context timeout
 		expectedError := "Error getting report emitted log"
 		mockForwarderClient.EXPECT().
 			GetReportProcessedEvents(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
@@ -309,10 +500,14 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), expectedError)
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
 	})
 
 	t.Run("TX already transmitted successfully - Failed to fetch transaction receipt", func(t *testing.T) {
-		ctx := t.Context()
+		// Short timeout so quick retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
 		testLogger := logger.Test(t)
 		evmServiceMock, mockForwarderClient, service := createMocksAndCapability(t, testLogger)
 
@@ -321,13 +516,14 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 			InvalidReceiver: false,
 			State:           TransmissionStateSucceeded,
 		}
-		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, mock.Anything).Return(transmissionInfo, nil).Once()
+		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, mock.Anything).Return(transmissionInfo, nil)
 
 		txHash := evmtypes.Hash(test.RandomBytes(32))
 		mockForwarderClient.EXPECT().
 			GetReportProcessedEvents(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 			Return([]*evmtypes.Log{{TxHash: txHash}}, nil)
 
+		// Will be retried until context timeout
 		expectedError := "Error getting tx receipt"
 		evmServiceMock.EXPECT().
 			GetTransactionReceipt(mock.Anything, evmtypes.GeTransactionReceiptRequest{Hash: txHash, IsExternal: false}).
@@ -346,6 +542,60 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), expectedError)
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
+	})
+
+	t.Run("TX already transmitted successfully - Failed to calculate transaction fee", func(t *testing.T) {
+		// Short timeout so quick retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
+		testLogger := logger.Test(t)
+		evmServiceMock, mockForwarderClient, service := createMocksAndCapability(t, testLogger)
+
+		transmissionInfo := contracts.TransmissionInfo{
+			Success:         true,
+			InvalidReceiver: false,
+			State:           TransmissionStateSucceeded,
+		}
+		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, mock.Anything).Return(transmissionInfo, nil)
+
+		txHash := evmtypes.Hash(test.RandomBytes(32))
+		mockForwarderClient.EXPECT().
+			GetReportProcessedEvents(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+			Return([]*evmtypes.Log{{TxHash: txHash}}, nil)
+
+		receipt := evmtypes.Receipt{
+			Status:            uint64(TransmissionStateSucceeded),
+			TxHash:            txHash,
+			GasUsed:           1000,
+			EffectiveGasPrice: big.NewInt(2),
+		}
+		evmServiceMock.EXPECT().
+			GetTransactionReceipt(mock.Anything, evmtypes.GeTransactionReceiptRequest{Hash: txHash, IsExternal: false}).
+			Return(&receipt, nil)
+
+		// Will be retried until context timeout
+		expectedError := "Error calculating transaction fee"
+		evmServiceMock.EXPECT().
+			CalculateTransactionFee(mock.Anything, toReceiptGasInfo(receipt)).
+			Return(nil, errors.New(expectedError))
+
+		reportMetadata := createTestReportMetadata()
+		encodedReportMetadata, _ := reportMetadata.Encode()
+
+		_, err := service.WriteReport(ctx, createTestRequestMetadata(reportMetadata), &evm.WriteReportRequest{
+			Receiver: testutils.NewAddress().Bytes(),
+			Report: &workflowpb.ReportResponse{
+				RawReport:     encodedReportMetadata,
+				ReportContext: []byte{},
+				Sigs:          generateRandomSignatures(),
+			},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), expectedError)
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
 	})
 
 	t.Run("TX already transmitted - Invalid receiver (does NOT retry, returns reverted + invalid receiver message)", func(t *testing.T) {
@@ -421,7 +671,9 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 	})
 
 	t.Run("TX already transmitted and failed with enough gas - tx hash retrieval fails => returns error (no retry)", func(t *testing.T) {
-		ctx := t.Context()
+		// Short timeout so polling retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
 		testLogger := logger.Test(t)
 		_, mockForwarderClient, service := createMocksAndCapability(t, testLogger)
 
@@ -443,10 +695,9 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 				InvalidReceiver: false,
 				State:           TransmissionStateFailed,
 				GasLimit:        new(big.Int).SetUint64(desiredReceiverGas + 1), // strictly greater => no retry path
-			}, nil).
-			Once()
+			}, nil)
 
-		// Force TxHashRetriever.GetHash() to fail
+		// Force TxHashRetriever.GetHash() to fail - will be retried until context timeout
 		expectedErr := "error getting report emitted log"
 		mockForwarderClient.EXPECT().
 			GetReportProcessedEvents(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
@@ -463,6 +714,8 @@ func TestWriteReport_ExecuteWriteReport(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), expectedErr)
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
 
 		// Ensure no retry / no new tx attempt happened.
 		mockForwarderClient.AssertNotCalled(t, "InvokeOnReport", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
@@ -1265,14 +1518,20 @@ func TestExecuteWriteReport_TransmissionStates(t *testing.T) {
 
 		transmissionID, _ := getTransmissionID(capabilitiesMetadata.WorkflowExecutionID, writeReportRequest)
 
-		ctx := contexts.WithCRE(t.Context(), contexts.CRE{Workflow: "wf-id"})
+		// Short timeout so quick retry fails fast in tests
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
+		ctx = contexts.WithCRE(ctx, contexts.CRE{Workflow: "wf-id"})
 
+		// Will be retried until context timeout
 		expectedError := "transmission info error"
 		mockForwarderClient.On("GetTransmissionInfo", mock.Anything, transmissionID).Return(contracts.TransmissionInfo{}, errors.New(expectedError))
 
 		reply, responseMetadata, err := service.executeWriteReport(ctx, writeReportRequest, capabilitiesMetadata, monitoring.TelemetryContext{})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), expectedError)
+		// Verify we get the original error, not a context timeout
+		require.NotContains(t, err.Error(), "context deadline exceeded")
 		require.Nil(t, reply)
 		require.Empty(t, responseMetadata.Metering)
 	})
