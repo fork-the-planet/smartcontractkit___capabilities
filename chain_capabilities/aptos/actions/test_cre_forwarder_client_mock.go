@@ -122,7 +122,7 @@ type CREForwarderClient_mock_GetTransmitterTransactions_Call struct {
 
 // GetTransmitterTransactions is a helper method to define mock.On call
 //   - ctx context.Context
-//   - transmitter types.AccountAddress
+//   - transmitter aptos_sdk.AccountAddress
 //   - start *uint64
 //   - limit *uint64
 func (_e *CREForwarderClient_mock_Expecter) GetTransmitterTransactions(ctx interface{}, transmitter interface{}, start interface{}, limit interface{}) *CREForwarderClient_mock_GetTransmitterTransactions_Call {
