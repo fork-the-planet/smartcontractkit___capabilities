@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/gagliardetto/solana-go"
@@ -83,13 +84,18 @@ func (fc *forwarderClient) InvokeOnReport(ctx context.Context, receiver solana.P
 		return nil, fmt.Errorf("failed to build report instruction: %w", err)
 	}
 
-	// meta[0] - forwarderState, meta[1] - executionState are already included
-	accounts := append(solana.AccountMetaSlice(ix.Accounts()), convertMetaPB(meta)[2:]...)
-	data, err := ix.Data()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get report instruction data: %w", err)
+	// meta[0] - forwarderState, meta[1] - executionState are already included in the instruction
+	converted, convErr := convertMetaPB(meta)
+	if convErr != nil {
+		return nil, fmt.Errorf("invalid remaining account metas: %w", convErr)
 	}
-	ix = solana.NewInstruction(ix.ProgramID(), accounts, data)
+	genericIX, ok := ix.(*solana.GenericInstruction)
+	if !ok {
+		return nil, fmt.Errorf("expected *solana.GenericInstruction from NewReportInstruction, got %T", ix)
+	}
+	for _, acc := range converted[2:] {
+		genericIX.AccountValues = append(genericIX.AccountValues, acc)
+	}
 
 	// we can encode with empty block hash here, it will be updated with recent blockhash later
 	tx, err := solana.NewTransaction([]solana.Instruction{ix}, solana.Hash{}, solana.TransactionPayer(fc.transmitter))
@@ -195,15 +201,33 @@ func getConfigID(donID uint32, configVersion uint32) uint64 {
 	return (uint64(donID) << 32) | uint64(configVersion)
 }
 
-func convertMetaPB(m []*solcap.AccountMeta) []*solana.AccountMeta {
-	ret := make([]*solana.AccountMeta, 0)
+// validateRemainingAccountMetas ensures each account meta has a 32-byte public key so that
+// solana.PublicKey conversion cannot panic on short input.
+func validateRemainingAccountMetas(accounts []*solcap.AccountMeta) error {
+	for i, acc := range accounts {
+		if acc == nil {
+			return fmt.Errorf("remaining account %d: nil account meta", i)
+		}
+		pk := acc.GetPublicKey()
+		if len(pk) != solana.PublicKeyLength {
+			return fmt.Errorf("remaining account %d: public key must be exactly %d bytes, got %d (hex: %s)", i, solana.PublicKeyLength, len(pk), hex.EncodeToString(pk))
+		}
+	}
+	return nil
+}
+
+func convertMetaPB(m []*solcap.AccountMeta) ([]*solana.AccountMeta, error) {
+	if err := validateRemainingAccountMetas(m); err != nil {
+		return nil, err
+	}
+	ret := make([]*solana.AccountMeta, 0, len(m))
 	for _, acc := range m {
 		ret = append(ret, &solana.AccountMeta{
 			PublicKey:  solana.PublicKey(acc.PublicKey),
 			IsWritable: acc.IsWritable,
 		})
 	}
-	return ret
+	return ret, nil
 }
 
 func (fc *forwarderClient) deriveExecutionState(transmissionID [32]byte) (solana.PublicKey, error) {
