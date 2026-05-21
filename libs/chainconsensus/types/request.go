@@ -239,7 +239,7 @@ type HashableRequest[T proto.Message] struct {
 	reference           string
 	metadata            commoncap.ResponseMetadata
 	*observableRequest[T]
-	observations map[[HashLength]byte]T
+	observations map[Hash]T
 	obsLock      sync.RWMutex
 }
 
@@ -248,7 +248,7 @@ func NewHashableRequest[T proto.Message](workflowExecutionID, reference string, 
 		workflowExecutionID: workflowExecutionID,
 		reference:           reference,
 		metadata:            metadata,
-		observations:        make(map[[HashLength]byte]T),
+		observations:        make(map[Hash]T),
 		observableRequest: &observableRequest[T]{
 			id:      commonMon.RequestID(workflowExecutionID, reference),
 			observe: observe,
@@ -263,24 +263,19 @@ func (r *HashableRequest[T]) Copy() Request {
 
 var errNoObservation = errors.New("no observation captured yet")
 
-func (r *HashableRequest[T]) captureObservationHash() ([HashLength]byte, ObservationError, error) {
+func (r *HashableRequest[T]) captureObservationHash() (Hash, ObservationError, error) {
 	observation, obErr, ok := r.GetObservation()
 	if !ok {
-		return [HashLength]byte{}, nil, errNoObservation
+		return Hash{}, nil, errNoObservation
 	}
 
 	if obErr != nil {
-		return [HashLength]byte{}, obErr, nil
+		return Hash{}, obErr, nil
 	}
 
-	rawPayload, err := proto.MarshalOptions{Deterministic: true}.Marshal(observation)
+	reportData, err := reportDataForObservation(r.workflowExecutionID, r.reference, r.metadata, observation)
 	if err != nil {
-		return [HashLength]byte{}, nil, fmt.Errorf("failed to marshal observation: %w", err)
-	}
-
-	reportData, err := commoncap.ResponseToReportData(r.workflowExecutionID, r.reference, rawPayload, r.metadata)
-	if err != nil {
-		return [HashLength]byte{}, nil, fmt.Errorf("failed to convert response to report data: %w", err)
+		return Hash{}, nil, err
 	}
 	r.obsLock.Lock()
 	defer r.obsLock.Unlock()
@@ -310,7 +305,7 @@ func (r *HashableRequest[T]) GetOCRObservation() (*RequestObservation, error) {
 	}, nil
 }
 
-func (r *HashableRequest[T]) GetObservationByReportData(reportData [HashLength]byte) (T, bool) {
+func (r *HashableRequest[T]) GetObservationByReportData(reportData Hash) (T, bool) {
 	r.obsLock.RLock()
 	defer r.obsLock.RUnlock()
 	result, ok := r.observations[reportData]
@@ -363,7 +358,9 @@ func (r *LockableToBlockHashableRequest[T]) LockToABlock(chainHeight *ChainHeigh
 
 const HashLength = 32
 
-func (r *LockableToBlockHashableRequest[T]) GetObservationByReportData(reportData [HashLength]byte) (T, bool) {
+type Hash [HashLength]byte
+
+func (r *LockableToBlockHashableRequest[T]) GetObservationByReportData(reportData Hash) (T, bool) {
 	r.hashableReqLock.RLock()
 	defer r.hashableReqLock.RUnlock()
 	if r.hashableRequest == nil {
