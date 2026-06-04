@@ -322,10 +322,6 @@ func (rp *reportingPlugin) ValidateObservation(_ context.Context, outctx ocr3typ
 					return fmt.Errorf("volatile observation value is nil for request ID %s. OracleID: %d", requestID, ao.Observer)
 				}
 
-				if volatileOb.Height < 0 {
-					return fmt.Errorf("invalid height in volatile observation for request ID %s: got %d. OracleID: %d", requestID, volatileOb.Height, ao.Observer)
-				}
-
 				if len(volatileOb.Hash) != ctypes.HashLength {
 					return fmt.Errorf("invalid hash length for volatile observation of request ID %s: got %d, expected %d. OracleID: %d", requestID, len(volatileOb.Hash), ctypes.HashLength, ao.Observer)
 				}
@@ -607,7 +603,7 @@ func (rp *reportingPlugin) agreeOnHashableValue(requestID string, aos []attribut
 	return mode[[32]byte, []byte](rp.config.N, rp.config.F, iterator)
 }
 
-func medianInt64(heights []int64) float64 {
+func medianUInt64(heights []uint64) float64 {
 	if len(heights) == 0 {
 		return 0
 	}
@@ -625,8 +621,8 @@ func isVolatileCandidateABetter(a, b *volatileOutcomeCandidate) bool {
 		return a.supporters > b.supporters
 	}
 
-	aHeight := medianInt64(a.heights)
-	bHeight := medianInt64(b.heights)
+	aHeight := medianUInt64(a.heights)
+	bHeight := medianUInt64(b.heights)
 	if aHeight != bHeight {
 		return aHeight > bHeight
 	}
@@ -641,7 +637,7 @@ type volatileOutcomeCandidate struct {
 	hash         ctypes.Hash
 	supporters   int
 	lowestOracle commontypes.OracleID
-	heights      []int64
+	heights      []uint64
 }
 
 func (rp *reportingPlugin) agreeOnVolatileValue(requestID string, aos []attributedObservation) (*ctypes.RequestOutcome, int, error) {
@@ -670,7 +666,7 @@ func (rp *reportingPlugin) agreeOnVolatileValue(requestID string, aos []attribut
 					hash:         key,
 					supporters:   1,
 					lowestOracle: ao.Observer,
-					heights:      []int64{vo.Height},
+					heights:      []uint64{vo.Height},
 				}
 			} else {
 				stats.supporters++
