@@ -113,7 +113,6 @@ func (s *Stellar) GetLatestLedger(ctx context.Context, metadata capabilities.Req
 	if err != nil {
 		s.lggr.Errorw("Failed to GetLatestLedger", "error", err)
 		return nil, capcommon.GetError(fmt.Errorf("failed to GetLatestLedger: %w", err), false)
-
 	}
 	return responseAndMetadata, nil
 }
@@ -220,6 +219,3 @@ func isUserError(err error) bool {
 func isStellarNodeInfraError(err error) bool {
 	return errors.Is(err, multinode.ErrNodeError) || strings.Contains(err.Error(), multinode.ErrNodeError.Error())
 }
-
-var GetError = capcommon.GetError
-var NewUserError = caperrors.NewPublicUserError

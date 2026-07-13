@@ -3,7 +3,7 @@ module github.com/smartcontractkit/capabilities/chain_capabilities/stellar
 go 1.26.2
 
 require (
-	github.com/smartcontractkit/capabilities/libs v0.0.0-20260609124022-2749e4a32bfb
+	github.com/smartcontractkit/capabilities/libs v0.0.0-20260713160126-ac9205412b4c
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260701155917-1446a98ed330
 	github.com/stellar/go-stellar-sdk v0.5.0
 )
@@ -109,7 +109,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v0.19.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
